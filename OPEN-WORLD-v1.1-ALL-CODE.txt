@@ -1,0 +1,1317 @@
+OPEN WORLD v1.1 — COMPLETE SOURCE CODE
+======================================
+The active browser app is served from public/index.html.
+The root index.html is an older standalone prototype retained in the ZIP for reference.
+
+
+================================================================================
+FILE: server.js
+================================================================================
+
+const path = require('path');
+const http = require('http');
+const express = require('express');
+const { Server } = require('socket.io');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+const PORT = process.env.PORT || 3000;
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/health', (_req, res) => res.json({ ok: true, players: io.engine.clientsCount }));
+
+const players = new Map();
+
+io.on('connection', (socket) => {
+  socket.on('join-world', (payload = {}) => {
+    const name = String(payload.name || 'Driver').trim().slice(0, 16) || 'Driver';
+    const player = {
+      id: socket.id,
+      name,
+      x: Number(payload.x) || 2.8,
+      z: Number(payload.z) || 10,
+      rotation: 0,
+      inCar: false,
+      carX: 0,
+      carZ: 5,
+      carRotation: 0
+    };
+    players.set(socket.id, player);
+    socket.emit('world-state', [...players.values()].filter((p) => p.id !== socket.id));
+    socket.broadcast.emit('player-joined', player);
+  });
+
+  socket.on('player-move', (state = {}) => {
+    const current = players.get(socket.id);
+    if (!current) return;
+    // Accept only the small set of numeric fields used by the game.
+    for (const key of ['x', 'z', 'rotation', 'carX', 'carZ', 'carRotation']) {
+      if (Number.isFinite(state[key])) current[key] = state[key];
+    }
+    current.inCar = Boolean(state.inCar);
+    io.emit('player-moved', current);
+  });
+
+  socket.on('disconnect', () => {
+    players.delete(socket.id);
+    socket.broadcast.emit('player-left', socket.id);
+  });
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Open World is running at http://localhost:${PORT}`);
+});
+
+
+================================================================================
+FILE: public/index.html
+================================================================================
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#101820" />
+  <title>OPEN WORLD — City Driver</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="game-root"></div>
+
+  <div class="topbar">
+    <div class="brand"><span class="brand-mark">O</span><span>OPEN <b>WORLD</b></span></div>
+    <div class="topbar-right">
+      <span id="network-status" class="status-dot offline">OFFLINE</span>
+      <span class="build-tag">BROWSER PROTOTYPE</span>
+    </div>
+  </div>
+
+  <div id="hud" class="hud hidden">
+    <div class="mission-card">
+      <div class="eyebrow">FREE ROAM</div>
+      <div id="mission-title" class="mission-title">CITY TOUR · 1/4</div>
+      <div id="mission-sub" class="mission-sub">Head to MARKET STREET · Earn $150</div>
+    </div>
+    <div class="speed-card">
+      <div class="eyebrow">VELOCITY</div>
+      <div><span id="speed">0</span><small> KM/H</small></div>
+      <div class="wallet-line">CREDITS <b id="credits">$0</b> <span>·</span> CITY SCORE <b id="city-score">0</b></div>
+    </div>
+  </div>
+
+  <div id="prompt" class="prompt hidden">Press <kbd>E</kbd> to enter vehicle</div>
+  <div id="toast" class="toast hidden"></div>
+
+  <div id="start-screen" class="overlay">
+    <div class="start-panel">
+      <div class="eyebrow">YOUR CITY. YOUR RULES.</div>
+      <h1>OPEN<br /><span>WORLD</span></h1>
+      <p class="intro">Explore a living city with roaming pedestrians, traffic, multiple rides, checkpoints and arcade-style street props.</p>
+      <label for="player-name">DRIVER NAME</label>
+      <input id="player-name" maxlength="16" value="Player" autocomplete="nickname" />
+      <div class="start-actions">
+        <button id="play-solo" class="primary-button">PLAY SOLO <span>→</span></button>
+        <button id="play-online" class="secondary-button">JOIN MULTIPLAYER <span>↗</span></button>
+      </div>
+      <div id="start-message" class="start-message">Multiplayer requires the game server to be running.</div>
+      <div class="start-footer">EARLY ACCESS · CITY DISTRICT 01</div>
+    </div>
+  </div>
+
+  <div class="help-card">
+    <div class="help-title">CONTROLS</div>
+    <div class="key-row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Move / drive</span></div>
+    <div class="key-row"><kbd>E</kbd><span>Enter or exit nearest ride</span></div>
+    <div class="key-row"><kbd>SHIFT</kbd><span>Run</span></div>
+    <div class="key-row"><kbd>DRAG</kbd><span>Look around</span></div>
+    <div class="key-row"><kbd>WHEEL</kbd><span>Zoom camera</span></div>
+  </div>
+
+  <div class="bottom-note">CITY DISTRICT 01 <span>•</span> LIVING CITY SANDBOX</div>
+  <div id="touch-controls" class="touch-controls">
+    <div class="touch-pad">
+      <button data-key="KeyW">▲</button>
+      <div><button data-key="KeyA">◀</button><button data-key="KeyS">▼</button><button data-key="KeyD">▶</button></div>
+    </div>
+    <button data-key="KeyE" class="touch-action">ENTER<br />/ EXIT</button>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
+
+
+================================================================================
+FILE: public/main.js
+================================================================================
+
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+const root = document.getElementById('game-root');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9bb9c2);
+scene.fog = new THREE.Fog(0x9bb9c2, 95, 245);
+
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.8));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+root.appendChild(renderer.domElement);
+
+const hemi = new THREE.HemisphereLight(0xe9f6ff, 0x55634b, 2.0);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff0d5, 3.0);
+sun.position.set(-65, 105, 45);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -130;
+sun.shadow.camera.right = 130;
+sun.shadow.camera.top = 130;
+sun.shadow.camera.bottom = -130;
+sun.shadow.bias = -0.00015;
+scene.add(sun);
+
+const mats = {
+  grass: new THREE.MeshStandardMaterial({ color: 0x647d5c, roughness: 1 }),
+  asphalt: new THREE.MeshStandardMaterial({ color: 0x30383b, roughness: 0.95 }),
+  sidewalk: new THREE.MeshStandardMaterial({ color: 0x9a9b91, roughness: 1 }),
+  line: new THREE.MeshStandardMaterial({ color: 0xd7d6b9, roughness: 1 }),
+  white: new THREE.MeshStandardMaterial({ color: 0xe9e6dc, roughness: 0.75 }),
+  glass: new THREE.MeshStandardMaterial({ color: 0x263e4b, roughness: 0.18, metalness: 0.35 }),
+  dark: new THREE.MeshStandardMaterial({ color: 0x182329, roughness: 0.7 }),
+  leaf: new THREE.MeshStandardMaterial({ color: 0x355d43, roughness: 1 }),
+  trunk: new THREE.MeshStandardMaterial({ color: 0x67513a, roughness: 1 })
+};
+const buildingMats = [0xb8b1a2, 0x8d9fa2, 0xb6a18c, 0x89948d, 0xc5c2b7, 0x9eabb2].map(
+  (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.9 })
+);
+const worldColliders = [];
+const decorative = new THREE.Group();
+scene.add(decorative);
+
+function box(parent, w, h, d, material, x, y, z, cast = true, receive = true) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  mesh.position.set(x, y, z);
+  mesh.castShadow = cast;
+  mesh.receiveShadow = receive;
+  parent.add(mesh);
+  return mesh;
+}
+
+// Ground and an orderly street grid give the prototype a city-sized playground.
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(260, 260), mats.grass);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.08;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const roadCenters = [-80, -40, 0, 40, 80];
+for (const p of roadCenters) {
+  const vertical = new THREE.Mesh(new THREE.PlaneGeometry(12, 240), mats.asphalt);
+  vertical.rotation.x = -Math.PI / 2;
+  vertical.position.set(p, 0, 0);
+  vertical.receiveShadow = true;
+  scene.add(vertical);
+  const horizontal = new THREE.Mesh(new THREE.PlaneGeometry(240, 12), mats.asphalt);
+  horizontal.rotation.x = -Math.PI / 2;
+  horizontal.position.set(0, 0.001, p);
+  horizontal.receiveShadow = true;
+  scene.add(horizontal);
+
+  for (let t = -112; t <= 112; t += 10) {
+    if (Math.abs(t % 40) < 0.1) continue;
+    const dashA = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 4.2), mats.line);
+    dashA.rotation.x = -Math.PI / 2;
+    dashA.position.set(p, 0.012, t);
+    scene.add(dashA);
+    const dashB = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 0.18), mats.line);
+    dashB.rotation.x = -Math.PI / 2;
+    dashB.position.set(t, 0.013, p);
+    scene.add(dashB);
+  }
+}
+
+// Sidewalk strips alongside roads.
+for (const p of roadCenters) {
+  for (const side of [-1, 1]) {
+    const s1 = new THREE.Mesh(new THREE.PlaneGeometry(240, 1.5), mats.sidewalk);
+    s1.rotation.x = -Math.PI / 2;
+    s1.position.set(0, 0.006, p + side * 7.1);
+    scene.add(s1);
+    const s2 = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 240), mats.sidewalk);
+    s2.rotation.x = -Math.PI / 2;
+    s2.position.set(p + side * 7.1, 0.007, 0);
+    scene.add(s2);
+  }
+}
+
+function addTree(x, z, scale = 1) {
+  const tree = new THREE.Group();
+  tree.position.set(x, 0, z);
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.23 * scale, 0.32 * scale, 2.2 * scale, 7), mats.trunk);
+  trunk.position.y = 1.1 * scale;
+  trunk.castShadow = true;
+  tree.add(trunk);
+  const crown = new THREE.Mesh(new THREE.SphereGeometry(1.15 * scale, 9, 7), mats.leaf);
+  crown.position.y = 2.65 * scale;
+  crown.castShadow = true;
+  tree.add(crown);
+  decorative.add(tree);
+}
+
+function addLamp(x, z, rotation = 0) {
+  const lamp = new THREE.Group();
+  lamp.position.set(x, 0, z);
+  lamp.rotation.y = rotation;
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.12, 5.4, 7), mats.dark);
+  pole.position.y = 2.7;
+  pole.castShadow = true;
+  lamp.add(pole);
+  const arm = box(lamp, 1.2, 0.09, 0.09, mats.dark, 0.48, 5.25, 0, true, false);
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffe6a8 }));
+  bulb.position.set(1.0, 5.12, 0);
+  lamp.add(bulb);
+  decorative.add(lamp);
+}
+
+// Buildings occupy the blocks between streets. Each has a roof lip and dark windows.
+let seed = 17;
+function rand() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+for (const x of [-60, -20, 20, 60]) {
+  for (const z of [-60, -20, 20, 60]) {
+    const w = 17 + rand() * 8;
+    const d = 17 + rand() * 8;
+    const h = 9 + rand() * 28;
+    const bx = x + (rand() - 0.5) * 4;
+    const bz = z + (rand() - 0.5) * 4;
+    const mat = buildingMats[Math.floor(rand() * buildingMats.length)];
+    box(scene, w, h, d, mat, bx, h / 2, bz);
+    box(scene, w + 0.5, 0.35, d + 0.5, mats.dark, bx, h + 0.1, bz, false, true);
+    // Repeating facade windows on the two sides facing the main roads.
+    const windowMat = new THREE.MeshStandardMaterial({ color: 0x39515b, metalness: 0.35, roughness: 0.28, emissive: 0x14242b, emissiveIntensity: 0.18 });
+    for (let level = 1; level < Math.floor(h / 3.4); level++) {
+      for (let col = -1; col <= 1; col++) {
+        const winW = 1.25;
+        const winH = 1.35;
+        box(scene, winW, winH, 0.08, windowMat, bx + col * 3.4, level * 3.1 + 1.2, bz + d / 2 + 0.05, false, false);
+        box(scene, 0.08, winH, winW, windowMat, bx + w / 2 + 0.05, level * 3.1 + 1.2, bz + col * 3.4, false, false);
+      }
+    }
+    worldColliders.push({ x: bx, z: bz, halfW: w / 2 + 0.6, halfD: d / 2 + 0.6 });
+    addTree(x - 12.5, z + 12.5, 0.85);
+    if (rand() > 0.45) addTree(x + 12.2, z - 12.2, 0.72);
+  }
+}
+
+for (const p of roadCenters) {
+  for (const t of [-27, 27]) {
+    addLamp(p + 8.4, t, 0);
+    addLamp(t, p - 8.4, Math.PI / 2);
+  }
+}
+
+// A few simple road markings and a central plaza landmark.
+const plaza = new THREE.Mesh(new THREE.CylinderGeometry(5.5, 5.5, 0.35, 28), new THREE.MeshStandardMaterial({ color: 0xabb5ad, roughness: 0.8 }));
+plaza.position.set(20, 0.18, 20);
+plaza.receiveShadow = true;
+scene.add(plaza);
+const fountainWater = new THREE.Mesh(new THREE.CylinderGeometry(3.8, 3.8, 0.18, 28), new THREE.MeshStandardMaterial({ color: 0x4c9ba7, roughness: 0.2, metalness: 0.15 }));
+fountainWater.position.set(20, 0.43, 20);
+scene.add(fountainWater);
+
+function createCar(color = 0x9c302a) {
+  const group = new THREE.Group();
+  const paint = new THREE.MeshStandardMaterial({ color, metalness: 0.55, roughness: 0.32 });
+  const trim = new THREE.MeshStandardMaterial({ color: 0x10191e, roughness: 0.45 });
+  const body = box(group, 2.05, 0.65, 4.35, paint, 0, 0.82, 0);
+  body.castShadow = true;
+  const cabin = box(group, 1.62, 0.8, 2.1, mats.glass, 0, 1.48, -0.18);
+  cabin.castShadow = true;
+  box(group, 1.75, 0.14, 2.25, trim, 0, 1.08, -0.18, true, false);
+  box(group, 1.72, 0.12, 0.13, mats.white, 0, 0.91, -2.19, false, false);
+  const rearLight = new THREE.MeshStandardMaterial({ color: 0xc43d35, emissive: 0x5c0805, emissiveIntensity: 0.6 });
+  box(group, 0.5, 0.16, 0.09, rearLight, -0.68, 0.92, 2.19, false, false);
+  box(group, 0.5, 0.16, 0.09, rearLight, 0.68, 0.92, 2.19, false, false);
+  const wheelGeo = new THREE.CylinderGeometry(0.43, 0.43, 0.27, 12);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x15191b, roughness: 0.94 });
+  const wheels = [];
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(sx * 1.02, 0.48, sz * 1.42);
+      wheel.castShadow = true;
+      group.add(wheel);
+      wheels.push(wheel);
+    }
+  }
+  group.userData.wheels = wheels;
+  group.userData.paint = paint;
+  return group;
+}
+
+function createAvatar(color = 0xc7f36b) {
+  const group = new THREE.Group();
+  const shirt = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
+  const pants = new THREE.MeshStandardMaterial({ color: 0x283744, roughness: 1 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xb9825e, roughness: 0.9 });
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.38, 0.72, 4, 8), shirt);
+  torso.position.y = 1.18;
+  torso.castShadow = true;
+  group.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 12, 10), skin);
+  head.position.y = 1.92;
+  head.castShadow = true;
+  group.add(head);
+  for (const sx of [-0.2, 0.2]) {
+    const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.52, 3, 6), pants);
+    leg.position.set(sx, 0.43, 0);
+    leg.castShadow = true;
+    group.add(leg);
+  }
+  return group;
+}
+
+const player = {
+  mesh: createAvatar(),
+  x: 2.8, z: 9.5, rotation: 0,
+  inCar: false,
+  speed: 0,
+  car: createCar(0x356d91),
+  walkPhase: 0
+};
+scene.add(player.mesh);
+scene.add(player.car);
+player.mesh.position.set(player.x, 0, player.z);
+player.car.position.set(0, 0, 3.4);
+
+// A small vehicle pool lets the player choose a ride by walking up to it.
+player.car.userData.vehicleName = 'CITY SEDAN';
+const vehicleFleet = [player.car];
+function addParkedCar(name, color, x, z, rotation = 0, scale = 1) {
+  const car = createCar(color);
+  car.position.set(x, 0, z);
+  car.rotation.y = rotation;
+  car.scale.setScalar(scale);
+  car.userData.vehicleName = name;
+  scene.add(car);
+  vehicleFleet.push(car);
+  return car;
+}
+addParkedCar('SPORT COUPE', 0xc34c35, -37.2, 2.7, Math.PI / 2, 0.96);
+addParkedCar('CITY TAXI', 0xe6bd42, 42.8, -2.7, -Math.PI / 2, 1.02);
+addParkedCar('RANGER SUV', 0x536e4b, 2.7, -42.8, 0, 1.12);
+
+// Local ambient traffic and pedestrians make every client city feel alive.
+const trafficCars = [];
+const trafficColors = [0x8b9ca7, 0x4c7770, 0xb7a08a, 0x6b6e91, 0xd2d0c6, 0x283b51];
+for (let i = 0; i < 10; i++) {
+  const car = createCar(trafficColors[i % trafficColors.length]);
+  const axis = i % 2 === 0 ? 'x' : 'z';
+  const road = roadCenters[Math.floor(i / 2)];
+  const lane = road + (i % 4 < 2 ? 2.25 : -2.25);
+  const direction = i % 4 < 2 ? 1 : -1;
+  const start = -105 + (i * 23) % 190;
+  car.position.set(axis === 'x' ? start : lane, 0, axis === 'z' ? start : lane);
+  car.rotation.y = axis === 'x' ? (direction > 0 ? Math.PI / 2 : -Math.PI / 2) : (direction > 0 ? Math.PI : 0);
+  car.scale.setScalar(0.76 + (i % 3) * 0.04);
+  scene.add(car);
+  trafficCars.push({ mesh: car, axis, lane, direction, speed: 5.5 + (i % 4) * 1.25 });
+}
+
+const pedestrians = [];
+const pedestrianColors = [0x4e778e, 0xd0a14d, 0x8b6c91, 0x56836d, 0xb56d5c, 0xc0c4c1];
+for (let i = 0; i < 16; i++) {
+  const avatar = createAvatar(pedestrianColors[i % pedestrianColors.length]);
+  const axis = i % 2 === 0 ? 'x' : 'z';
+  const road = roadCenters[Math.floor(i / 4) % roadCenters.length];
+  const side = i % 4 < 2 ? -1 : 1;
+  const lane = road + side * 8.7;
+  const direction = i % 3 === 0 ? -1 : 1;
+  const start = -104 + (i * 31) % 200;
+  avatar.position.set(axis === 'x' ? start : lane, 0, axis === 'z' ? start : lane);
+  avatar.rotation.y = axis === 'x' ? (direction > 0 ? Math.PI / 2 : -Math.PI / 2) : (direction > 0 ? Math.PI : 0);
+  avatar.scale.setScalar(0.86);
+  scene.add(avatar);
+  pedestrians.push({ mesh: avatar, axis, lane, direction, speed: 0.75 + (i % 4) * 0.18, phase: i });
+}
+
+// Breakable props are harmless arcade objects: cones and small street crates.
+const breakableProps = [];
+const propMaterials = [
+  new THREE.MeshStandardMaterial({ color: 0xf08b36, roughness: 0.85 }),
+  new THREE.MeshStandardMaterial({ color: 0xe2bf52, roughness: 0.9 })
+];
+function addBreakable(x, z, type = 'cone') {
+  const group = new THREE.Group();
+  if (type === 'cone') {
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.48, 0.16, 8), mats.dark);
+    base.position.y = 0.08;
+    group.add(base);
+    const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.31, 0.85, 8), propMaterials[0]);
+    cone.position.y = 0.55;
+    cone.castShadow = true;
+    group.add(cone);
+  } else {
+    const crate = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.95, 0.95), propMaterials[1]);
+    crate.position.y = 0.48;
+    crate.castShadow = true;
+    group.add(crate);
+  }
+  group.position.set(x, 0, z);
+  scene.add(group);
+  breakableProps.push({ mesh: group, x, z, active: true });
+}
+for (const p of [-80, -40, 0, 40, 80]) {
+  addBreakable(p + 4.9, -13.5, 'cone');
+  addBreakable(p - 4.9, 13.5, 'crate');
+}
+
+// Four city-tour checkpoints provide a simple first mission loop.
+const missionStops = [
+  { x: 40, z: 0, name: 'MARKET STREET', reward: 150 },
+  { x: 0, z: -40, name: 'NORTH AVENUE', reward: 200 },
+  { x: -40, z: 0, name: 'RIVERSIDE TURN', reward: 250 },
+  { x: 0, z: 40, name: 'CENTRAL PLAZA', reward: 300 }
+];
+const checkpointMeshes = missionStops.map((stop) => {
+  const group = new THREE.Group();
+  const ringMat = new THREE.MeshStandardMaterial({ color: 0xc7f36b, emissive: 0x6d9b28, emissiveIntensity: 0.9, roughness: 0.35 });
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(2.5, 0.16, 8, 28), ringMat);
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.35;
+  group.add(ring);
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.55, 5.5, 10, 1, true), new THREE.MeshBasicMaterial({ color: 0xc7f36b, transparent: true, opacity: 0.12, side: THREE.DoubleSide }));
+  beam.position.y = 2.9;
+  group.add(beam);
+  group.position.set(stop.x, 0, stop.z);
+  scene.add(group);
+  return { group, ring, ringMat };
+});
+let missionIndex = 0;
+let credits = 0;
+let breakableScore = 0;
+
+const remotePlayers = new Map();
+function createRemote(id, name) {
+  const avatar = createAvatar(0xe0a45c);
+  const car = createCar(0x96714b);
+  scene.add(avatar, car);
+  const remote = { id, name, avatar, car, state: null };
+  remotePlayers.set(id, remote);
+  return remote;
+}
+function applyRemote(state) {
+  if (state.id === socket?.id) return;
+  const remote = remotePlayers.get(state.id) || createRemote(state.id, state.name || 'Driver');
+  remote.state = state;
+  remote.avatar.visible = !state.inCar;
+  remote.car.visible = Boolean(state.inCar);
+  remote.avatar.position.set(state.x || 0, 0, state.z || 0);
+  remote.avatar.rotation.y = state.rotation || 0;
+  remote.car.position.set(state.carX || 0, 0, state.carZ || 0);
+  remote.car.rotation.y = state.carRotation || 0;
+}
+
+let cameraYaw = 0;
+let cameraPitch = 0.19;
+let cameraDistance = 8.5;
+let gameStarted = false;
+let socket = null;
+let lastNetworkSend = 0;
+const keys = Object.create(null);
+const speedEl = document.getElementById('speed');
+const promptEl = document.getElementById('prompt');
+const startScreen = document.getElementById('start-screen');
+const hud = document.getElementById('hud');
+const networkStatus = document.getElementById('network-status');
+const startMessage = document.getElementById('start-message');
+const playerNameInput = document.getElementById('player-name');
+const missionTitleEl = document.getElementById('mission-title');
+const missionSubEl = document.getElementById('mission-sub');
+const creditsEl = document.getElementById('credits');
+const scoreEl = document.getElementById('city-score');
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+function showToast(message) {
+  if (!toastEl) return;
+  toastEl.textContent = message;
+  toastEl.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 2300);
+}
+function refreshMissionHud() {
+  if (!missionTitleEl || !missionSubEl) return;
+  if (missionIndex >= missionStops.length) {
+    missionTitleEl.textContent = 'CITY TOUR COMPLETE';
+    missionSubEl.textContent = 'Free roam is yours. Keep exploring the district.';
+    return;
+  }
+  const stop = missionStops[missionIndex];
+  missionTitleEl.textContent = `CITY TOUR · ${missionIndex + 1}/${missionStops.length}`;
+  missionSubEl.textContent = `Head to ${stop.name} · Earn $${stop.reward}`;
+}
+refreshMissionHud();
+
+function collidesWithBuilding(x, z, radius = 0.8) {
+  return worldColliders.some((b) => Math.abs(x - b.x) < b.halfW + radius && Math.abs(z - b.z) < b.halfD + radius);
+}
+function keyDown(code) { return Boolean(keys[code]); }
+function setKey(code, down) { keys[code] = down; }
+
+function enterOrExitCar() {
+  if (!gameStarted) return;
+  if (player.inCar) {
+    const sideX = Math.cos(player.car.rotation.y) * 2.2;
+    const sideZ = Math.sin(player.car.rotation.y) * 2.2;
+    let exitX = player.car.position.x + sideX;
+    let exitZ = player.car.position.z + sideZ;
+    if (collidesWithBuilding(exitX, exitZ, 0.7)) { exitX += sideX * 1.5; exitZ += sideZ * 1.5; }
+    player.x = exitX;
+    player.z = exitZ;
+    player.rotation = player.car.rotation.y;
+    player.inCar = false;
+    player.speed = 0;
+    player.mesh.visible = true;
+    showToast('You are on foot. Find another ride!');
+  } else {
+    let nearest = null;
+    let nearestDistance = Infinity;
+    for (const car of vehicleFleet) {
+      const distance = Math.hypot(player.x - car.position.x, player.z - car.position.z);
+      if (distance < nearestDistance) { nearest = car; nearestDistance = distance; }
+    }
+    if (nearest && nearestDistance < 4.8) {
+      player.car = nearest;
+      player.inCar = true;
+      player.mesh.visible = false;
+      player.car.position.y = 0;
+      player.speed = 0;
+      showToast(`Driving: ${player.car.userData.vehicleName || 'CITY CAR'}`);
+    }
+  }
+}
+
+window.addEventListener('keydown', (event) => {
+  if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft', 'ShiftRight', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) event.preventDefault();
+  if (event.code === 'KeyE' && !event.repeat) enterOrExitCar();
+  setKey(event.code, true);
+});
+window.addEventListener('keyup', (event) => setKey(event.code, false));
+window.addEventListener('blur', () => { for (const key of Object.keys(keys)) keys[key] = false; });
+
+let dragging = false;
+let lastPointerX = 0;
+let lastPointerY = 0;
+renderer.domElement.addEventListener('pointerdown', (event) => { dragging = true; lastPointerX = event.clientX; lastPointerY = event.clientY; renderer.domElement.setPointerCapture(event.pointerId); });
+renderer.domElement.addEventListener('pointermove', (event) => {
+  if (!dragging || !gameStarted) return;
+  const dx = event.clientX - lastPointerX;
+  const dy = event.clientY - lastPointerY;
+  lastPointerX = event.clientX;
+  lastPointerY = event.clientY;
+  cameraYaw -= dx * 0.005;
+  cameraPitch = THREE.MathUtils.clamp(cameraPitch + dy * 0.0025, -0.04, 0.65);
+});
+renderer.domElement.addEventListener('pointerup', () => { dragging = false; });
+renderer.domElement.addEventListener('pointercancel', () => { dragging = false; });
+renderer.domElement.addEventListener('wheel', (event) => { cameraDistance = THREE.MathUtils.clamp(cameraDistance + event.deltaY * 0.008, 4.5, 15); }, { passive: true });
+
+// Touch buttons map directly to the same keyboard controls.
+for (const button of document.querySelectorAll('[data-key]')) {
+  const code = button.dataset.key;
+  const down = (event) => { event.preventDefault(); if (code === 'KeyE') enterOrExitCar(); else setKey(code, true); };
+  const up = (event) => { event.preventDefault(); setKey(code, false); };
+  button.addEventListener('pointerdown', down);
+  button.addEventListener('pointerup', up);
+  button.addEventListener('pointerleave', up);
+  button.addEventListener('pointercancel', up);
+}
+
+function connectMultiplayer(name) {
+  if (typeof window.io !== 'function') {
+    startMessage.textContent = 'The multiplayer server is not available. Start the project with npm start, then open this page.';
+    networkStatus.textContent = 'SOLO MODE';
+    networkStatus.className = 'status-dot offline';
+    return;
+  }
+  socket = window.io();
+  socket.on('connect', () => {
+    networkStatus.textContent = 'ONLINE';
+    networkStatus.className = 'status-dot online';
+    startMessage.textContent = 'Connected! Other players in this room will appear in your city.';
+    socket.emit('join-world', { name, x: player.x, z: player.z });
+  });
+  socket.on('connect_error', () => {
+    networkStatus.textContent = 'OFFLINE';
+    networkStatus.className = 'status-dot offline';
+  });
+  socket.on('world-state', (list) => list.forEach(applyRemote));
+  socket.on('player-joined', applyRemote);
+  socket.on('player-moved', applyRemote);
+  socket.on('player-left', (id) => {
+    const remote = remotePlayers.get(id);
+    if (remote) { scene.remove(remote.avatar, remote.car); remotePlayers.delete(id); }
+  });
+}
+
+function startGame(multiplayer) {
+  if (gameStarted) return;
+  gameStarted = true;
+  startScreen.classList.add('hidden');
+  hud.classList.remove('hidden');
+  if (multiplayer) connectMultiplayer(playerNameInput.value.trim() || 'Driver');
+  else {
+    networkStatus.textContent = 'SOLO MODE';
+    networkStatus.className = 'status-dot offline';
+  }
+}
+document.getElementById('play-solo').addEventListener('click', () => startGame(false));
+document.getElementById('play-online').addEventListener('click', () => startGame(true));
+
+const clock = new THREE.Clock();
+function update(dt) {
+  const forwardInput = (keyDown('KeyW') || keyDown('ArrowUp') ? 1 : 0) - (keyDown('KeyS') || keyDown('ArrowDown') ? 1 : 0);
+  const sideInput = (keyDown('KeyD') || keyDown('ArrowRight') ? 1 : 0) - (keyDown('KeyA') || keyDown('ArrowLeft') ? 1 : 0);
+
+  if (!player.inCar) {
+    const cameraForwardX = Math.sin(cameraYaw);
+    const cameraForwardZ = -Math.cos(cameraYaw);
+    const rightX = Math.cos(cameraYaw);
+    const rightZ = Math.sin(cameraYaw);
+    let moveX = cameraForwardX * forwardInput + rightX * sideInput;
+    let moveZ = cameraForwardZ * forwardInput + rightZ * sideInput;
+    const length = Math.hypot(moveX, moveZ);
+    if (length > 0.001) {
+      moveX /= length; moveZ /= length;
+      const run = keyDown('ShiftLeft') || keyDown('ShiftRight');
+      const pace = run ? 7.8 : 4.6;
+      const nextX = player.x + moveX * pace * dt;
+      const nextZ = player.z + moveZ * pace * dt;
+      if (!collidesWithBuilding(nextX, player.z, 0.55)) player.x = nextX;
+      if (!collidesWithBuilding(player.x, nextZ, 0.55)) player.z = nextZ;
+      player.rotation = Math.atan2(moveX, -moveZ);
+      player.walkPhase += dt * (run ? 12 : 8);
+      player.mesh.position.y = Math.abs(Math.sin(player.walkPhase)) * 0.055;
+    } else {
+      player.mesh.position.y = THREE.MathUtils.damp(player.mesh.position.y, 0, 8, dt);
+    }
+    player.mesh.position.x = player.x;
+    player.mesh.position.z = player.z;
+    player.mesh.rotation.y = player.rotation;
+    let closestCar = null;
+    let closestCarDistance = Infinity;
+    for (const car of vehicleFleet) {
+      const distance = Math.hypot(player.x - car.position.x, player.z - car.position.z);
+      if (distance < closestCarDistance) { closestCar = car; closestCarDistance = distance; }
+    }
+    const nearCar = closestCarDistance < 4.8;
+    promptEl.classList.toggle('hidden', !nearCar);
+    if (nearCar && closestCar) promptEl.innerHTML = `Press <kbd>E</kbd> to enter ${closestCar.userData.vehicleName || 'vehicle'}`;
+  } else {
+    promptEl.classList.remove('hidden');
+    promptEl.innerHTML = 'Press <kbd>E</kbd> to exit vehicle';
+    const acceleration = 17;
+    const maxSpeed = 28;
+    if (forwardInput > 0) player.speed = Math.min(maxSpeed, player.speed + acceleration * dt);
+    else if (forwardInput < 0) player.speed = Math.max(-10, player.speed - acceleration * 0.72 * dt);
+    else player.speed *= Math.pow(0.28, dt);
+    if (Math.abs(player.speed) < 0.12) player.speed = 0;
+    const steeringStrength = THREE.MathUtils.clamp(Math.abs(player.speed) / 9, 0, 1);
+    player.car.rotation.y += sideInput * steeringStrength * Math.sign(player.speed || 1) * 1.55 * dt;
+    const dx = Math.sin(player.car.rotation.y) * player.speed * dt;
+    const dz = -Math.cos(player.car.rotation.y) * player.speed * dt;
+    const nextX = THREE.MathUtils.clamp(player.car.position.x + dx, -116, 116);
+    const nextZ = THREE.MathUtils.clamp(player.car.position.z + dz, -116, 116);
+    if (!collidesWithBuilding(nextX, nextZ, 1.35)) {
+      player.car.position.x = nextX;
+      player.car.position.z = nextZ;
+    } else {
+      player.speed *= -0.18;
+    }
+    for (const wheel of player.car.userData.wheels) wheel.rotation.x += player.speed * dt * 1.7;
+    player.x = player.car.position.x;
+    player.z = player.car.position.z;
+    player.rotation = player.car.rotation.y;
+  }
+
+  // Ambient vehicles cruise along the marked city lanes.
+  for (const traffic of trafficCars) {
+    const posKey = traffic.axis === 'x' ? 'x' : 'z';
+    traffic.mesh.position[posKey] += traffic.direction * traffic.speed * dt;
+    if (traffic.mesh.position[posKey] > 118) traffic.mesh.position[posKey] = -118;
+    if (traffic.mesh.position[posKey] < -118) traffic.mesh.position[posKey] = 118;
+    for (const wheel of traffic.mesh.userData.wheels) wheel.rotation.x += traffic.speed * dt * 1.4;
+  }
+  // Pedestrians follow simple sidewalk routes and turn around at district edges.
+  for (const ped of pedestrians) {
+    const posKey = ped.axis === 'x' ? 'x' : 'z';
+    ped.mesh.position[posKey] += ped.direction * ped.speed * dt;
+    if (ped.mesh.position[posKey] > 108) ped.mesh.position[posKey] = -108;
+    if (ped.mesh.position[posKey] < -108) ped.mesh.position[posKey] = 108;
+    ped.mesh.position.y = Math.abs(Math.sin(performance.now() * 0.004 + ped.phase)) * 0.035;
+  }
+  // Pulse the active mission ring so it is easy to spot in the city.
+  checkpointMeshes.forEach((marker, index) => {
+    marker.group.visible = index === missionIndex;
+    if (index === missionIndex) {
+      marker.ring.rotation.z += dt * 0.55;
+      marker.group.position.y = 0.08 + Math.sin(performance.now() * 0.0025) * 0.12;
+    }
+  });
+  const missionTarget = missionStops[missionIndex];
+  if (missionTarget) {
+    const targetPosition = player.inCar ? player.car.position : player.mesh.position;
+    if (Math.hypot(targetPosition.x - missionTarget.x, targetPosition.z - missionTarget.z) < 6.5) {
+      credits += missionTarget.reward;
+      missionIndex += 1;
+      creditsEl.textContent = `$${credits}`;
+      refreshMissionHud();
+      showToast(`Checkpoint reached! +$${missionTarget.reward}`);
+    }
+  }
+  // Driving into small street props knocks them aside for a small arcade score bonus.
+  if (player.inCar) {
+    for (const prop of breakableProps) {
+      if (!prop.active) continue;
+      if (Math.hypot(player.car.position.x - prop.x, player.car.position.z - prop.z) < 1.9) {
+        prop.active = false;
+        scene.remove(prop.mesh);
+        breakableScore += 25;
+        scoreEl.textContent = String(breakableScore);
+        showToast('Street prop cleared · +25 CITY SCORE');
+      }
+    }
+  }
+
+  speedEl.textContent = String(Math.round(Math.abs(player.speed) * 3.6));
+  updateCamera(dt);
+  if (socket?.connected && performance.now() - lastNetworkSend > 100) {
+    lastNetworkSend = performance.now();
+    socket.emit('player-move', {
+      x: player.x, z: player.z, rotation: player.rotation, inCar: player.inCar,
+      carX: player.car.position.x, carZ: player.car.position.z, carRotation: player.car.rotation.y
+    });
+  }
+}
+
+function updateCamera(dt) {
+  const target = player.inCar ? player.car.position : player.mesh.position;
+  const height = player.inCar ? 1.35 : 1.55;
+  const horizontal = cameraDistance * Math.cos(cameraPitch);
+  const vertical = cameraDistance * Math.sin(cameraPitch) + height;
+  const desired = new THREE.Vector3(
+    target.x + Math.sin(cameraYaw) * horizontal,
+    target.y + vertical,
+    target.z + Math.cos(cameraYaw) * horizontal
+  );
+  camera.position.lerp(desired, 1 - Math.exp(-5 * dt));
+  camera.lookAt(target.x, target.y + height, target.z);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.04);
+  if (gameStarted) update(dt);
+  else {
+    camera.position.set(29, 25, 34);
+    camera.lookAt(0, 0, 0);
+    camera.rotation.z = Math.sin(performance.now() * 0.00015) * 0.003;
+  }
+  renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.8));
+});
+
+camera.position.set(29, 25, 34);
+camera.lookAt(0, 0, 0);
+animate();
+
+
+================================================================================
+FILE: public/style.css
+================================================================================
+
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800;900&family=DM+Sans:wght@400;500;600;700&display=swap');
+:root { color-scheme: dark; --lime: #c7f36b; --ink: #101820; --panel: rgba(13, 22, 29, .84); }
+* { box-sizing: border-box; }
+html, body, #game-root { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #9bb5bd; font-family: 'DM Sans', sans-serif; }
+canvas { display: block; width: 100%; height: 100%; }
+.topbar { position: fixed; z-index: 5; top: 0; left: 0; right: 0; height: 66px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; color: #f6f7f2; background: linear-gradient(180deg, rgba(8,16,21,.78), transparent); pointer-events: none; }
+.brand { display: flex; align-items: center; gap: 10px; font: 800 18px 'Barlow Condensed', sans-serif; letter-spacing: 2px; }
+.brand b { color: var(--lime); }
+.brand-mark { width: 27px; height: 27px; display: grid; place-items: center; border: 2px solid var(--lime); color: var(--lime); border-radius: 8px 2px 8px 2px; font-size: 17px; }
+.topbar-right { display: flex; align-items: center; gap: 14px; font-size: 10px; letter-spacing: 1.3px; font-weight: 700; }
+.status-dot { color: #b9c7c9; }.status-dot::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #78868b; }.status-dot.online::before { background: var(--lime); box-shadow: 0 0 10px var(--lime); }
+.build-tag { padding: 7px 9px; border: 1px solid rgba(255,255,255,.24); border-radius: 3px; color: #d5dfdc; }
+.overlay { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; background: linear-gradient(90deg, rgba(5,12,17,.83), rgba(5,12,17,.24)), linear-gradient(0deg, rgba(5,12,17,.55), transparent 55%); transition: opacity .35s, visibility .35s; }
+.overlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+.start-panel { width: min(460px, calc(100vw - 38px)); padding: 38px 42px 28px; color: #f7f8f4; background: rgba(12,22,28,.88); border: 1px solid rgba(255,255,255,.15); box-shadow: 0 24px 90px rgba(0,0,0,.35); backdrop-filter: blur(13px); }
+.eyebrow { color: var(--lime); font: 700 10px 'DM Sans', sans-serif; letter-spacing: 2.4px; }
+h1 { margin: 12px 0 11px; font: 900 clamp(55px, 8vw, 78px)/.82 'Barlow Condensed', sans-serif; letter-spacing: 1px; }
+h1 span { color: var(--lime); }
+.intro { max-width: 335px; color: #bdc9c8; font-size: 13px; line-height: 1.65; margin: 19px 0 24px; }
+.start-panel label { display: block; margin: 0 0 7px; color: #a9b8b8; font-size: 9px; font-weight: 700; letter-spacing: 1.6px; }
+.start-panel input { width: 100%; height: 42px; padding: 0 12px; outline: none; color: #fff; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.19); border-radius: 2px; font: 500 13px 'DM Sans'; }
+.start-panel input:focus { border-color: var(--lime); }
+.start-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 12px; }
+button { cursor: pointer; font-family: inherit; }
+.primary-button, .secondary-button { height: 44px; padding: 0 13px; border-radius: 2px; font-size: 10px; font-weight: 800; letter-spacing: .8px; }
+.primary-button { color: #121a1d; background: var(--lime); border: 1px solid var(--lime); }.primary-button span, .secondary-button span { float: right; font-size: 16px; line-height: 10px; }
+.secondary-button { color: #f3f5ef; background: transparent; border: 1px solid rgba(255,255,255,.3); }
+.primary-button:hover { background: #d7ff87; }.secondary-button:hover { border-color: var(--lime); color: var(--lime); }
+.start-message { min-height: 28px; margin-top: 11px; color: #91a3a4; font-size: 10px; line-height: 1.4; }
+.start-footer { padding-top: 16px; margin-top: 13px; border-top: 1px solid rgba(255,255,255,.13); color: #829293; font-size: 9px; letter-spacing: 1.4px; }
+.hud { position: fixed; z-index: 4; top: 84px; left: 28px; right: 28px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; }.hud.hidden, .prompt.hidden { display: none; }
+.mission-card, .speed-card { padding: 13px 16px; color: white; background: rgba(10,20,25,.72); border-left: 2px solid var(--lime); backdrop-filter: blur(7px); }.mission-title { margin-top: 5px; font: 700 20px 'Barlow Condensed'; letter-spacing: .5px; }.mission-sub { margin-top: 3px; color: #bfcbca; font-size: 10px; }.speed-card { min-width: 122px; text-align: right; border-left: 0; border-right: 2px solid var(--lime); }.speed-card div:last-child { margin-top: 3px; font: 800 28px 'Barlow Condensed'; }.speed-card small { color: #aebcbc; font: 700 9px 'DM Sans'; letter-spacing: 1px; }
+.prompt { position: fixed; z-index: 4; left: 50%; bottom: 15%; transform: translateX(-50%); padding: 11px 17px; color: #f7f9f2; background: rgba(8,17,21,.82); border: 1px solid rgba(199,243,107,.5); font-size: 12px; white-space: nowrap; }.prompt kbd { color: #101820; background: var(--lime); }
+kbd { display: inline-grid; place-items: center; min-width: 21px; height: 20px; padding: 0 5px; color: #edf3ed; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.22); border-radius: 3px; font: 700 9px 'DM Sans'; }
+.help-card { position: fixed; z-index: 4; right: 28px; bottom: 30px; width: 192px; padding: 13px 14px; color: white; background: rgba(10,20,25,.72); border-top: 2px solid rgba(199,243,107,.8); backdrop-filter: blur(7px); }.help-title { margin-bottom: 9px; color: var(--lime); font-size: 9px; font-weight: 800; letter-spacing: 1.6px; }.key-row { display: flex; align-items: center; gap: 4px; min-height: 25px; color: #b8c5c5; font-size: 9px; }.key-row span { margin-left: 6px; }
+.bottom-note { position: fixed; z-index: 4; bottom: 19px; left: 28px; color: rgba(255,255,255,.76); font-size: 9px; font-weight: 700; letter-spacing: 1.8px; pointer-events: none; }.bottom-note span { padding: 0 6px; color: var(--lime); }
+.touch-controls { display: none; position: fixed; z-index: 6; left: 15px; right: 15px; bottom: 18px; justify-content: space-between; align-items: end; pointer-events: none; }.touch-controls button { pointer-events: auto; width: 43px; height: 43px; margin: 2px; border: 1px solid rgba(255,255,255,.4); border-radius: 10px; color: white; background: rgba(10,20,25,.55); font-weight: 800; touch-action: none; }.touch-pad { display: flex; flex-direction: column; align-items: center; }.touch-action { width: 66px !important; height: 54px !important; color: var(--lime) !important; font-size: 9px; }
+@media (max-width: 700px) { .topbar { padding: 0 15px; }.build-tag { display: none; }.help-card { display: none; }.bottom-note { display: none; }.hud { top: 75px; left: 12px; right: 12px; }.mission-card { max-width: 205px; }.mission-sub { max-width: 175px; }.touch-controls { display: flex; }.start-panel { padding: 30px 25px 22px; }.start-actions { grid-template-columns: 1fr; }.speed-card { min-width: 95px; }.prompt { bottom: 115px; } }
+
+.speed-card .wallet-line { margin-top: 7px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,.15); color: #9fb0ae; font: 700 8px 'DM Sans', sans-serif; font-weight: 700; letter-spacing: .8px; white-space: nowrap; }
+.speed-card .wallet-line b { color: var(--lime); font-size: 10px; margin: 0 5px 0 2px; }
+.speed-card .wallet-line span { color: rgba(255,255,255,.35); }
+.toast { position: fixed; z-index: 8; left: 50%; top: 72px; transform: translateX(-50%); max-width: calc(100vw - 32px); padding: 11px 17px; color: #f6f8ef; background: rgba(10,20,25,.9); border: 1px solid rgba(199,243,107,.6); box-shadow: 0 8px 30px rgba(0,0,0,.28); font-size: 11px; font-weight: 700; letter-spacing: .35px; text-align: center; pointer-events: none; }
+.toast.hidden { display: none; }
+@media (max-width: 700px) { .speed-card .wallet-line { font-size: 7px; letter-spacing: .35px; }.speed-card .wallet-line b { font-size: 9px; margin-right: 2px; }.toast { top: 66px; font-size: 10px; } }
+
+
+================================================================================
+FILE: package.json
+================================================================================
+
+{
+  "name": "open-world-browser-starter",
+  "version": "1.1.0",
+  "private": true,
+  "description": "A living-city 3D open-world browser driving prototype with optional multiplayer rooms.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  }
+}
+
+
+================================================================================
+FILE: start.bat
+================================================================================
+
+@echo off
+cd /d "%~dp0"
+if not exist node_modules call npm install
+npm start
+pause
+
+
+================================================================================
+FILE: README.md
+================================================================================
+
+# OPEN WORLD — Living City Browser Prototype
+
+A browser-based 3D open-world driving sandbox built with Three.js and Node.js. This upgraded starter adds a small living city while keeping the original solo and Socket.IO multiplayer entry points.
+
+## Features
+
+- Procedurally arranged 3D city blocks, roads, sidewalks, trees, lamps and a central plaza
+- Third-person character movement, running, camera orbit and zoom
+- Multiple enterable vehicles: city sedan, sports coupe, taxi and SUV
+- Simple ambient traffic that cruises around the district
+- Pedestrians walking along sidewalk routes
+- Four city-tour checkpoints with in-game credit rewards
+- Harmless arcade-style breakable street props that award city score
+- Solo mode and a starter Socket.IO room for seeing other connected players
+- Basic touch controls on smaller screens
+
+## Requirements
+
+- Node.js 18 or newer
+- A modern desktop or mobile browser with WebGL support
+- Internet access for the Three.js module and Google Fonts CDN
+
+## Run the game
+
+1. Install Node.js from https://nodejs.org/ if it is not already installed.
+2. Extract this ZIP folder.
+3. Open a terminal in the `open-world-starter` folder.
+4. Run:
+
+   ```bash
+   npm install
+   npm start
+   ```
+
+5. Open http://localhost:3000 in your browser.
+6. Choose **Play Solo** or **Join Multiplayer**.
+
+On Windows, you can also double-click `start.bat`; it installs the packages if needed and starts the server.
+
+## Controls
+
+- **W / A / S / D** or **arrow keys** — walk or drive
+- **E** — enter the nearest parked vehicle or exit the current vehicle
+- **Shift** — run
+- **Mouse drag** — rotate the camera
+- **Mouse wheel** — zoom the camera
+- **Touch buttons** — move and enter/exit on supported mobile screens
+
+## Multiplayer testing
+
+For a local test, open the same address in two browser tabs and choose **Join Multiplayer** in both. For another device on the same Wi-Fi network, open the host computer's local network IP address with port `3000` (for example `http://192.168.1.10:3000`). The Node.js server must stay running.
+
+Multiplayer currently relays player position and vehicle state. City traffic and pedestrians are simulated locally on each client. This is a prototype, not a public production service. Before a public release, add accounts, server-authoritative movement, input validation, rate limiting, moderation, persistence and deployment security.
+
+## Current scope and next milestones
+
+This is a playable foundation, not a finished commercial game. The vehicles and people are built from simple 3D shapes. The next upgrades could include detailed original models, better vehicle physics, a larger map, shops/interiors, mission variety, audio, save data, a minimap, and robust hosted multiplayer.
+
+
+================================================================================
+FILE: .gitignore
+================================================================================
+
+node_modules/
+.DS_Store
+.env
+
+
+================================================================================
+FILE: index.html
+================================================================================
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Open World — Browser Prototype</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #101820; }
+    #game { display: block; width: 100%; height: 100%; outline: none; }
+    #hud { position: fixed; inset: 0; pointer-events: none; color: #f5f7fa; }
+    .panel { background: rgba(9, 16, 24, .78); border: 1px solid rgba(255,255,255,.16); border-radius: 14px; padding: 12px 14px; backdrop-filter: blur(10px); box-shadow: 0 8px 30px rgba(0,0,0,.18); }
+    #brand { position: absolute; top: 16px; left: 16px; min-width: 190px; }
+    #brand strong { display:block; font-size: 16px; letter-spacing: .14em; }
+    #brand small { display:block; color:#aebdca; margin-top:4px; }
+    #status { position:absolute; top:16px; right:16px; width:min(290px, calc(100vw - 32px)); }
+    #statusLine { font-size:13px; color:#d7e2ea; }
+    #speed { font-size:24px; font-weight:750; margin-top:5px; }
+    #prompt { position:absolute; bottom:125px; left:50%; transform:translateX(-50%); font-weight:650; text-align:center; padding:10px 16px; display:none; white-space:nowrap; }
+    #help { position:absolute; bottom:16px; left:16px; max-width:min(560px, calc(100vw - 32px)); font-size:12px; line-height:1.6; color:#cfdae2; }
+    #help b { color:#fff; }
+    #room { position:absolute; top:118px; right:16px; width:min(290px, calc(100vw - 32px)); pointer-events:auto; }
+    #room h3 { margin:0 0 8px; font-size:13px; letter-spacing:.05em; }
+    #room p { margin:0 0 9px; color:#bdcbd6; font-size:11px; line-height:1.4; }
+    .roomRow { display:flex; gap:6px; margin-top:7px; }
+    input, button { font:inherit; border-radius:8px; border:1px solid rgba(255,255,255,.2); padding:9px 10px; background:#172431; color:white; }
+    input { min-width:0; flex:1; width:100%; }
+    button { cursor:pointer; background:#2a79a8; border-color:#3a91c2; font-weight:650; }
+    button.secondary { background:#243746; border-color:#435666; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    #roomStatus { display:block; min-height:15px; margin-top:8px; font-size:11px; color:#9fd8b2; }
+    #toast { position:absolute; bottom:72px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,.72); padding:8px 13px; border-radius:9px; opacity:0; transition:opacity .2s; font-size:12px; }
+    #crosshair { position:absolute; left:50%; top:50%; width:4px; height:4px; border-radius:100%; background:rgba(255,255,255,.65); transform:translate(-50%,-50%); }
+    @media (max-width:650px) { #room { top:auto; bottom:160px; } #help { max-width:calc(100vw - 32px); } #status { width:180px; } #brand { min-width:0; } }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <canvas id="game" tabindex="0"></canvas>
+  <div id="hud">
+    <div id="brand" class="panel"><strong>OPEN WORLD</strong><small>City test build · v0.1</small></div>
+    <div id="status" class="panel"><div id="statusLine">On foot · Explore the city</div><div id="speed">0 km/h</div></div>
+    <div id="room" class="panel">
+      <h3>MULTIPLAYER TEST</h3>
+      <p>Create a room and share its code, or enter a friend's room code. This prototype supports one direct peer connection.</p>
+      <div class="roomRow"><button id="createRoom">Create room</button></div>
+      <div class="roomRow"><input id="roomCode" placeholder="Paste room code" autocomplete="off"/><button id="joinRoom" class="secondary">Join</button></div>
+      <span id="roomStatus">Single-player is ready.</span>
+    </div>
+    <div id="prompt" class="panel"></div>
+    <div id="crosshair"></div>
+    <div id="help" class="panel"><b>WASD</b> move / drive · <b>E</b> enter or exit car · <b>Shift</b> sprint · <b>Space</b> handbrake · <b>Mouse</b> look around (click the world first) · <b>Esc</b> release mouse</div>
+    <div id="toast"></div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    const canvas = document.getElementById('game');
+    const statusLine = document.getElementById('statusLine');
+    const speedEl = document.getElementById('speed');
+    const promptEl = document.getElementById('prompt');
+    const toastEl = document.getElementById('toast');
+    const roomStatus = document.getElementById('roomStatus');
+    const roomCodeInput = document.getElementById('roomCode');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x8db4cb);
+    scene.fog = new THREE.Fog(0x8db4cb, 180, 620);
+
+    const camera = new THREE.PerspectiveCamera(68, innerWidth / innerHeight, 0.1, 900);
+    camera.position.set(0, 10, 18);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.8));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+
+    scene.add(new THREE.HemisphereLight(0xdceeff, 0x52616b, 1.65));
+    const sun = new THREE.DirectionalLight(0xfff0d5, 2.1);
+    sun.position.set(-120, 180, 90);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -300; sun.shadow.camera.right = 300;
+    sun.shadow.camera.top = 300; sun.shadow.camera.bottom = -300;
+    scene.add(sun);
+
+    const mat = (color, roughness=0.85, metalness=0.02) => new THREE.MeshStandardMaterial({ color, roughness, metalness });
+    const groundMat = mat(0x52635a);
+    const roadMat = mat(0x252b31, 0.98);
+    const lineMat = mat(0xd5d1b5, 0.9);
+    const sidewalkMat = mat(0x858b8d, 0.95);
+    const buildingMats = [0x9b9d9b,0x777f89,0xb0a694,0x777b78,0x9a8f83,0x687983].map(c=>mat(c));
+    const windowMat = new THREE.MeshStandardMaterial({ color:0x213e52, roughness:.28, metalness:.25, emissive:0x102434, emissiveIntensity:.25 });
+
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(700,700), groundMat);
+    ground.rotation.x = -Math.PI/2; ground.position.y = -0.12; ground.receiveShadow = true; scene.add(ground);
+
+    // City blocks and streets.
+    const roadGroup = new THREE.Group(); scene.add(roadGroup);
+    for (let n=-3;n<=3;n++) {
+      const p=n*100;
+      const roadX=new THREE.Mesh(new THREE.PlaneGeometry(24,650),roadMat); roadX.rotation.x=-Math.PI/2; roadX.position.set(p,0,0); roadX.receiveShadow=true; roadGroup.add(roadX);
+      const roadZ=new THREE.Mesh(new THREE.PlaneGeometry(650,24),roadMat); roadZ.rotation.x=-Math.PI/2; roadZ.position.set(0,0,p); roadZ.receiveShadow=true; roadGroup.add(roadZ);
+      const dashCount=26;
+      for(let d=0;d<dashCount;d++){
+        const z=-312+d*24;
+        const dash=new THREE.Mesh(new THREE.PlaneGeometry(.22,8),lineMat); dash.rotation.x=-Math.PI/2; dash.position.set(p,0.025,z); roadGroup.add(dash);
+        const x=-312+d*24;
+        const dash2=new THREE.Mesh(new THREE.PlaneGeometry(8,.22),lineMat); dash2.rotation.x=-Math.PI/2; dash2.position.set(x,0.025,p); roadGroup.add(dash2);
+      }
+    }
+
+    const obstacleBoxes=[];
+    const addBuilding=(x,z,w,d,h,colorIndex)=>{
+      const base=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),buildingMats[colorIndex%buildingMats.length]);
+      base.position.set(x,h/2,z); base.castShadow=true; base.receiveShadow=true; scene.add(base);
+      obstacleBoxes.push({minX:x-w/2-1,maxX:x+w/2+1,minZ:z-d/2-1,maxZ:z+d/2+1});
+      // Repeated inset-looking window strips on the street-facing sides.
+      const rows=Math.max(2,Math.floor(h/5));
+      for(let r=0;r<rows;r++){
+        const y=3+r*4.5;
+        if(y>h-1) continue;
+        const windows=Math.max(2,Math.floor(w/6));
+        for(let j=0;j<windows;j++){
+          const wx=x-w/2+3+j*((w-6)/Math.max(1,windows-1));
+          const win1=new THREE.Mesh(new THREE.BoxGeometry(1.6,1.8,.12),windowMat); win1.position.set(wx,y,z+d/2+.07); scene.add(win1);
+          const win2=new THREE.Mesh(new THREE.BoxGeometry(1.6,1.8,.12),windowMat); win2.position.set(wx,y,z-d/2-.07); scene.add(win2);
+        }
+      }
+      const roof=new THREE.Mesh(new THREE.BoxGeometry(w*.35,.8,d*.35),mat(0x555b60)); roof.position.set(x,h+.4,z); roof.castShadow=true; scene.add(roof);
+    };
+    let seed=73421; const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+    for(let ix=-3;ix<3;ix++) for(let iz=-3;iz<3;iz++){
+      const cx=ix*100+50, cz=iz*100+50;
+      const count=2+Math.floor(rand()*3);
+      for(let b=0;b<count;b++){
+        const x=cx+(rand()-.5)*48, z=cz+(rand()-.5)*48;
+        const w=18+rand()*23, d=18+rand()*23, h=18+rand()*88;
+        addBuilding(x,z,w,d,h,Math.floor(rand()*buildingMats.length));
+      }
+      // A few trees around block edges.
+      for(let t=0;t<2;t++){
+        const x=cx+(rand()-.5)*70, z=cz+(rand()-.5)*70;
+        if(Math.abs(x-cx)<18 && Math.abs(z-cz)<18) continue;
+        const trunk=new THREE.Mesh(new THREE.CylinderGeometry(.45,.65,4,7),mat(0x594532)); trunk.position.set(x,2,z); trunk.castShadow=true; scene.add(trunk);
+        const crown=new THREE.Mesh(new THREE.SphereGeometry(3.2,9,7),mat(0x426a4b)); crown.position.set(x,5.8,z); crown.castShadow=true; scene.add(crown);
+      }
+    }
+
+    function makeCar(color=0xd04734){
+      const car=new THREE.Group();
+      const body=new THREE.Mesh(new THREE.BoxGeometry(4.2,1.25,7.2),mat(color,.42,.32)); body.position.y=1.15; body.castShadow=true; car.add(body);
+      const cabin=new THREE.Mesh(new THREE.BoxGeometry(3.2,1.35,3.2),new THREE.MeshStandardMaterial({color:0x233c4b,roughness:.28,metalness:.22})); cabin.position.set(0,2.18,-.45); cabin.castShadow=true; car.add(cabin);
+      const roof=new THREE.Mesh(new THREE.BoxGeometry(3.25,.18,3.25),mat(color,.38,.25)); roof.position.set(0,2.92,-.45); car.add(roof);
+      const bumperMat=mat(0x22272b,.55,.4);
+      for(const z of [-3.65,3.65]){const bumper=new THREE.Mesh(new THREE.BoxGeometry(4.25,.35,.25),bumperMat);bumper.position.set(0,.72,z);car.add(bumper);}
+      const wheelMat=mat(0x151719,.95), hubMat=mat(0x9ba4aa,.35,.75);
+      for(const x of [-2.05,2.05]) for(const z of [-2.35,2.35]){
+        const wheel=new THREE.Mesh(new THREE.CylinderGeometry(.72,.72,.48,16),wheelMat); wheel.rotation.z=Math.PI/2; wheel.position.set(x,.72,z); wheel.castShadow=true; car.add(wheel);
+        const hub=new THREE.Mesh(new THREE.CylinderGeometry(.32,.32,.5,12),hubMat); hub.rotation.z=Math.PI/2; hub.position.set(x,.72,z); car.add(hub);
+      }
+      for(const x of [-1.35,1.35]){const lamp=new THREE.Mesh(new THREE.BoxGeometry(.72,.35,.12),new THREE.MeshStandardMaterial({color:0xfff2ca,emissive:0xffd98a,emissiveIntensity:.55}));lamp.position.set(x,1.35,-3.66);car.add(lamp);}
+      return car;
+    }
+
+    function makePerson(color=0xe1b18a){
+      const g=new THREE.Group();
+      const shirt=new THREE.Mesh(new THREE.CapsuleGeometry(.58,.9,4,8),mat(color)); shirt.position.y=1.25; shirt.castShadow=true; g.add(shirt);
+      const head=new THREE.Mesh(new THREE.SphereGeometry(.38,12,10),mat(0xb9805b)); head.position.y=2.2; head.castShadow=true; g.add(head);
+      const legMat=mat(0x273441);
+      for(const x of [-.23,.23]){const leg=new THREE.Mesh(new THREE.CylinderGeometry(.17,.18,.85,8),legMat);leg.position.set(x,.43,0);g.add(leg);}
+      return g;
+    }
+
+    const player=makePerson(0x2e83b5); scene.add(player); player.position.set(0,0,10);
+    const car=makeCar(0xd64a34); scene.add(car); car.position.set(10,0,10); car.rotation.y=Math.PI/2;
+    const remotePerson=makePerson(0x7dc7a3); scene.add(remotePerson); remotePerson.visible=false;
+    const remoteCar=makeCar(0x377fb8); scene.add(remoteCar); remoteCar.visible=false;
+
+    let inCar=false, carSpeed=0, carYaw=car.rotation.y;
+    let cameraYaw=0, cameraPitch=.18, cameraDistance=13;
+    const keys={}; let pointerLocked=false;
+    const clock=new THREE.Clock();
+    const playerVelocity=new THREE.Vector3();
+    let remoteState=null, peer=null, peerConn=null, lastSend=0;
+
+    const showToast=(message)=>{toastEl.textContent=message;toastEl.style.opacity='1';clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>toastEl.style.opacity='0',2200);};
+    const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+    const blocked=(x,z,r=1)=>obstacleBoxes.some(b=>x+r>b.minX&&x-r<b.maxX&&z+r>b.minZ&&z-r<b.maxZ);
+    const target=()=>inCar?car.position:player.position;
+    const forwardFromYaw=(yaw)=>new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw));
+
+    function toggleCar(){
+      if(!inCar){
+        const distance=player.position.distanceTo(car.position);
+        if(distance<7){inCar=true;player.visible=false;carSpeed=0;showToast('You got in the car.');}
+        else showToast('Move closer to the car to enter it.');
+      }else{
+        const side=new THREE.Vector3(Math.cos(carYaw),0,-Math.sin(carYaw)).multiplyScalar(4.1);
+        const exitPos=car.position.clone().add(side);
+        if(!blocked(exitPos.x,exitPos.z,1)){player.position.copy(exitPos);player.rotation.y=carYaw;}
+        else player.position.copy(car.position).add(new THREE.Vector3(0,0,5));
+        player.visible=true;inCar=false;carSpeed=0;showToast('You got out of the car.');
+      }
+    }
+
+    window.addEventListener('keydown',e=>{keys[e.code]=true;if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();if(e.code==='KeyE'&&!e.repeat)toggleCar();});
+    window.addEventListener('keyup',e=>{keys[e.code]=false;});
+    canvas.addEventListener('click',()=>{canvas.focus();if(document.pointerLockElement!==canvas)canvas.requestPointerLock?.();});
+    document.addEventListener('pointerlockchange',()=>{pointerLocked=document.pointerLockElement===canvas;});
+    document.addEventListener('mousemove',e=>{if(pointerLocked){cameraYaw-=e.movementX*.0024;cameraPitch=clamp(cameraPitch+e.movementY*.0018,-.05,.65);}});
+
+    function updatePlayer(dt){
+      const input=new THREE.Vector3((keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0),0,(keys.KeyS||keys.ArrowDown?1:0)-(keys.KeyW||keys.ArrowUp?1:0));
+      if(input.lengthSq()>0){
+        input.normalize();
+        const f=forwardFromYaw(cameraYaw), r=new THREE.Vector3(Math.cos(cameraYaw),0,-Math.sin(cameraYaw));
+        const move=f.multiplyScalar(-input.z).add(r.multiplyScalar(input.x)).normalize();
+        const speed=keys.ShiftLeft||keys.ShiftRight?21:13;
+        const nx=player.position.x+move.x*speed*dt, nz=player.position.z+move.z*speed*dt;
+        if(!blocked(nx,player.position.z,.9))player.position.x=nx;
+        if(!blocked(player.position.x,nz,.9))player.position.z=nz;
+        player.rotation.y=Math.atan2(-move.x,-move.z);
+      }
+      player.position.x=clamp(player.position.x,-320,320);player.position.z=clamp(player.position.z,-320,320);
+    }
+    function updateCar(dt){
+      const throttle=(keys.KeyW||keys.ArrowUp?1:0)-(keys.KeyS||keys.ArrowDown?1:0);
+      const steer=(keys.KeyA||keys.ArrowLeft?1:0)-(keys.KeyD||keys.ArrowRight?1:0);
+      carSpeed+=throttle*25*dt;
+      carSpeed*=keys.Space?Math.pow(.06,dt):Math.pow(.985,dt*60);
+      carSpeed=clamp(carSpeed,-17,43);
+      carYaw+=steer*dt*(.85+Math.min(Math.abs(carSpeed)/22,1.4))*(carSpeed<0?-1:1);
+      const dir=forwardFromYaw(carYaw);
+      const nx=car.position.x+dir.x*carSpeed*dt, nz=car.position.z+dir.z*carSpeed*dt;
+      if(!blocked(nx,nz,2.4)){car.position.x=nx;car.position.z=nz;}else{carSpeed*=-.18;showToast('Bump!');}
+      car.position.x=clamp(car.position.x,-320,320);car.position.z=clamp(car.position.z,-320,320);
+      car.rotation.y=carYaw;
+      // Small steering lean makes the car feel less static.
+      car.rotation.z=THREE.MathUtils.damp(car.rotation.z,steer*.035*Math.min(Math.abs(carSpeed)/20,1),dt,7);
+    }
+
+    function updateCamera(dt){
+      const t=target().clone(); t.y+=inCar?1.2:1.8;
+      const horizontal=Math.cos(cameraPitch)*cameraDistance;
+      const offset=new THREE.Vector3(Math.sin(cameraYaw)*horizontal,Math.sin(cameraPitch)*cameraDistance+3,Math.cos(cameraYaw)*horizontal);
+      const desired=t.clone().add(offset);
+      camera.position.lerp(desired,1-Math.exp(-dt*7));
+      camera.lookAt(t);
+    }
+
+    function localState(){return {x:player.position.x,y:player.position.y,z:player.position.z,py:player.rotation.y,inCar,cx:car.position.x,cz:car.position.z,cy:carYaw};}
+    function updateNetwork(now){
+      if(peerConn&&peerConn.open&&now-lastSend>100){lastSend=now;try{peerConn.send(localState());}catch(_){}}
+      if(remoteState){
+        remotePerson.visible=!remoteState.inCar;remoteCar.visible=!!remoteState.inCar;
+        remotePerson.position.set(remoteState.x,0,remoteState.z);remotePerson.rotation.y=remoteState.py;
+        remoteCar.position.set(remoteState.cx,0,remoteState.cz);remoteCar.rotation.y=remoteState.cy;
+      }
+    }
+
+    function animate(){
+      requestAnimationFrame(animate);
+      const dt=Math.min(clock.getDelta(),.04);
+      if(inCar)updateCar(dt);else updatePlayer(dt);
+      updateCamera(dt);
+      const distance=player.position.distanceTo(car.position);
+      promptEl.style.display=(!inCar&&distance<9)?'block':'none';
+      promptEl.textContent='Press E to enter the car';
+      statusLine.textContent=inCar?'Driving · Find your own route':'On foot · Explore the city';
+      speedEl.textContent=Math.round(Math.abs(carSpeed)*3.6)+' km/h';
+      updateNetwork(performance.now());
+      renderer.render(scene,camera);
+    }
+    animate();
+
+    function attachConnection(conn){
+      if(peerConn&&peerConn.open){conn.close();roomStatus.textContent='This prototype allows one guest at a time.';return;}
+      peerConn=conn;
+      conn.on('open',()=>{roomStatus.textContent='Connected! Another player is joining your city.';showToast('Multiplayer connected.');});
+      conn.on('data',data=>{if(data&&typeof data.x==='number')remoteState=data;});
+      conn.on('close',()=>{peerConn=null;remoteState=null;remotePerson.visible=false;remoteCar.visible=false;roomStatus.textContent='Player disconnected. Single-player is still available.';});
+      conn.on('error',err=>{roomStatus.textContent='Connection issue: '+(err?.type||'unknown error');});
+    }
+
+    document.getElementById('createRoom').addEventListener('click',()=>{
+      if(!window.Peer){roomStatus.textContent='Multiplayer library did not load. Check your internet connection.';return;}
+      if(peer){peer.destroy();peer=null;peerConn=null;}
+      roomStatus.textContent='Creating room…';
+      peer=new Peer();
+      peer.on('open',id=>{roomCodeInput.value=id;roomStatus.textContent='Room ready. Share this code with one friend.';roomCodeInput.select();try{navigator.clipboard?.writeText(id);}catch(_){};});
+      peer.on('connection',attachConnection);
+      peer.on('error',err=>{roomStatus.textContent='Could not create room: '+(err?.type||'connection error');});
+    });
+    document.getElementById('joinRoom').addEventListener('click',()=>{
+      if(!window.Peer){roomStatus.textContent='Multiplayer library did not load. Check your internet connection.';return;}
+      const id=roomCodeInput.value.trim();if(!id){roomStatus.textContent='Enter a room code first.';return;}
+      if(peer){peer.destroy();peer=null;peerConn=null;}
+      roomStatus.textContent='Connecting…';peer=new Peer();
+      peer.on('open',()=>{const conn=peer.connect(id,{reliable:true});attachConnection(conn);});
+      peer.on('error',err=>{roomStatus.textContent='Could not join: '+(err?.type||'connection error');});
+    });
+
+    addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,1.8));});
+    addEventListener('beforeunload',()=>peer?.destroy());
+  </script>
+</body>
+</html>
+
